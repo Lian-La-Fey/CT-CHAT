@@ -1,3 +1,4 @@
+import os
 import torch
 from transformer_maskgit import CTViT
 import numpy as np
@@ -5,9 +6,9 @@ import nibabel as nib
 import argparse
 import torch.nn.functional as F
 
-import os
+import torch_xla
 import torch_xla.core.xla_model as xm
-import torch_xla.distributed.xla_spawn as xs
+import torch_xla.runtime as xr
 
 from glob import glob
 
@@ -100,19 +101,12 @@ def nii_img_to_tensor(path, slope, intercept, xy_spacing, z_spacing, device='cpu
 
     return tensor.to(device=device)
 
-def main():
-    parser = argparse.ArgumentParser(description='Process NIfTI image and encode it using a transformer model.')
-
-    parser.add_argument('--path', type=str, required=True, help='Path to the NIfTI image file.')
-    parser.add_argument('--slope', type=float, default=1, help='Slope for rescaling the image.')
-    parser.add_argument('--intercept', type=float, default=0, help='Intercept for rescaling the image.')
-    parser.add_argument('--xy_spacing', type=float, default=1, help='XY spacing of the image.')
-    parser.add_argument('--z_spacing', type=float, default=1, help='Z spacing of the image.')
-
-    args = parser.parse_args()
-    
+def _mp_fn(index, args, file_list):
     device = xm.xla_device()
-
+    world_size = xr.world_size()
+    
+    print(f"--> Starting process {index+1}/{world_size} on device: {device}")
+    
     image_encoder = CTViT(
         dim=512,
         codebook_size=8192,
@@ -124,10 +118,8 @@ def main():
         dim_head=32,
         heads=8
     ).to(device).eval()
-
-    # image_encoder.load("./CT_CLIP_encoder/clip_visual_encoder.pth")
     
-    ct_clip_weights = torch.load("/home/raspuntinov/gcs/ct_clip/CT-CLIP_v2.pt", map_location="cpu")
+    ct_clip_weights = torch.load("/home/raspuntinov/gcs/report_gen_models/ct_clip/CT-CLIP_v2.pt", map_location="cpu")
     visual_weights = {}
     for key, value in ct_clip_weights.items():
         if key.startswith('visual_transformer.'):
@@ -135,13 +127,68 @@ def main():
             visual_weights[new_key] = value
     
     image_encoder.load_state_dict(visual_weights, strict=False)
+    
+    # --- File Processing Loop ---
+    # Each process iterates over a unique slice of the file list.
+    # For example, with 4 TPUs:
+    # Process 0 gets files 0, 4, 8, ...
+    # Process 1 gets files 1, 5, 9, ...
+    for file_path in file_list[index::world_size]:
+        try:
+            print(f"Process {index+1}: Processing {os.path.basename(file_path)}")
+            
+            image = nii_img_to_tensor(
+                path=file_path,
+                slope=args.slope,
+                intercept=args.intercept,
+                xy_spacing=args.xy_spacing,
+                z_spacing=args.z_spacing,
+                device=device
+            )
 
-    image = nii_img_to_tensor(path=args.path, slope=args.slope, intercept=args.intercept, xy_spacing=args.xy_spacing, z_spacing=args.z_spacing, device=device)
+            image_encoded = image_encoder(image.unsqueeze(0), return_encoded_tokens=True)
 
-    image_encoded = image_encoder(image.unsqueeze(0), return_encoded_tokens=True)
+            image_name = os.path.basename(file_path).split(".")[0]
+            output_path = os.path.join(args.output_dir, f'{image_name}.npz')
+            
+            np.savez(output_path, arr=image_encoded.cpu().detach().numpy())
 
-    image_name = args.path.split("/")[-1].split(".")[0]
-    np.savez(f'./embeddings/{image_name}.npz', arr=image_encoded.cpu().detach().numpy())
+        except Exception as e:
+            print(f"Process {index+1}: Failed to process {file_path}. Error: {e}")
+
+    # A barrier ensures all processes finish before the master process continues.
+    xm.rendezvous("all_processes_done")
+    print(f"<-- Process {index+1}/{world_size} finished.")
+
+def main():
+    parser = argparse.ArgumentParser(description='Process a folder of NIfTI images in parallel on multiple TPUs.')
+
+    # CHANGED: Argument now takes a folder path
+    parser.add_argument('--folder_path', type=str, default="/home/raspuntinov/gcs/ct_rate/dataset/valid_fixed")
+    parser.add_argument('--output_dir', type=str, default='/home/raspuntinov/gcs/ct_rate/dataset/embeddings', help='Directory to save the output embeddings.')
+    parser.add_argument('--slope', type=float, default=1, help='Slope for rescaling the image.')
+    parser.add_argument('--intercept', type=float, default=0, help='Intercept for rescaling the image.')
+    parser.add_argument('--xy_spacing', type=float, default=1, help='XY spacing of the image.')
+    parser.add_argument('--z_spacing', type=float, default=1, help='Z spacing of the image.')
+
+    args = parser.parse_args()
+    
+    nii_gz_files = glob(f"{args.folder_path}/**/*.nii.gz", recursive=True)
+    all_files = sorted(nii_gz_files)
+
+    if not all_files:
+        print(f"Error: No .nii or .nii.gz files found in '{args.folder_path}'.")
+        return
+
+    print(f"Found {len(all_files)} files to process.")
+
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir, exist_ok=True)
+        
+    print("Spawning processes for all available TPU devices...")
+    # xs.xla_spawn(_mp_fn, args=(args, all_files))
+    torch_xla.launch(_mp_fn, args=(args, all_files))
+    print("All processing complete.")
 
 if __name__ == '__main__':
     main()

@@ -1,0 +1,34 @@
+[
+    {
+        "image": "valid_4_b_1.npz",
+        "conversations_out": []
+    },
+    {
+        "image": "valid_4_b_1.npz",
+        "conversations_out": []
+    },
+    {
+        "image": "valid_4_b_1.npz",
+        "conversations_out": []
+    },
+    {
+        "image": "valid_4_b_2.npz",
+        "conversations_out": []
+    },
+    {
+        "image": "valid_4_b_2.npz",
+        "conversations_out": []
+    },
+    {
+        "image": "valid_4_b_2.npz",
+        "conversations_out": []
+    },
+    {
+        "image": "valid_5_a_1.npz",
+        "conversations_out": []
+    },
+    {
+        "image": "valid_5_a_1.npz",
+        "conversations_out": []
+    }
+]

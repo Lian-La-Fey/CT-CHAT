@@ -1,3 +1,4 @@
+import os
 import argparse
 import torch
 import json
@@ -35,7 +36,7 @@ def main(args):
     tokenizer, model, image_processor, context_len = load_pretrained_model(args.model_path, args.model_base, model_name, args.load_8bit, args.load_4bit, device=args.device)
 
     # Open and read the JSON file
-    with open('merged_output_valid.json', 'r') as file:
+    with open(args.input_data, 'r') as file:
         data_val = json.load(file)
     output_save = []
     for element in tqdm.tqdm(data_val):
@@ -65,7 +66,11 @@ def main(args):
             roles = conv.roles
 
         image_file = element["image"].replace("nii.gz", "npz")
-        image_path = "path_to_valid_encodings/"+image_file
+        image_path = args.embeddings_path + image_file
+        
+        if not os.path.exists(image_path):
+            continue
+        
         image = np.load(image_path)["arr"]
         image_size = image.size
         # Similar operation in model_worker.py
@@ -78,6 +83,10 @@ def main(args):
         conversations_save = []
         for conversation in element["conversations"]:
             i = 0
+            
+            if conversation.get("type") != "report_generation":
+                continue
+            
             if conversation["from"] == "human":
                 inp = conversation["value"]
                 conv.append_message(conv.roles[0], inp)
@@ -98,7 +107,8 @@ def main(args):
                         temperature=args.temperature,
                         max_new_tokens=args.max_new_tokens,
                         streamer=streamer,
-                        use_cache=True)
+                        use_cache=True
+                    )
 
                 outputs = tokenizer.decode(output_ids[0]).strip()
                 conv.messages[-1][-1] = outputs
@@ -110,21 +120,31 @@ def main(args):
 
         output_save.append({"image": image_file, "conversations_out": conversations_save})
     # Save output_save to a JSON file
-    with open("output_validation_llama_70b_nonpretrained.json", "w") as json_file:
+    with open(args.output_file, "w") as json_file:
         json.dump(output_save, json_file, indent=4)
 
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default="path_to_trained_model")
-    parser.add_argument("--model-base", type=str, default="path_to_trained_model")
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--conv-mode", type=str, default=None)
+    parser.add_argument("--model_path", type=str, default="/home/raspuntinov/gcs/report_gen_models/ct_chat/llama_3.1_8b")
+    parser.add_argument("--model_base", type=str, default="/home/raspuntinov/gcs/report_gen_models/ct_chat/llama_3.1_8b_instrcut")
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--conv_mode", type=str, default=None)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--load-8bit", action="store_true")
     parser.add_argument("--load-4bit", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    
+    # Additional path parameters
+    parser.add_argument("--output_file", type=str, 
+                        default="./output/output_validation_CTRATE_ChestReport_CT_CLIPllama_3_8b.json",
+                        help="Output file path")
+    parser.add_argument("--input_data", type=str, 
+                        default="/home/raspuntinov/gcs/ct_rate/dataset/vqa/valid_vqa.json",
+                        help="Input JSON file")
+    parser.add_argument("--embeddings_path", type=str, default="./embeddings")
+    
     args = parser.parse_args()
     main(args)

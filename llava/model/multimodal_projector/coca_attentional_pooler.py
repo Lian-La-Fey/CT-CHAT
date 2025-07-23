@@ -45,6 +45,8 @@ class AttentionalPooler(nn.Module):
     ):
         super().__init__()
         self.query = nn.Parameter(torch.randn(n_queries, d_model))
+        
+        print('after init, query.shape =', self.query.shape)
 
         dim_head = d_model // n_head
 
@@ -62,7 +64,9 @@ class AttentionalPooler(nn.Module):
     def forward(self, x: torch.Tensor):
         if x.ndim == 3:
             x = rearrange(x, 'b n d -> b 1 n d')
-
+        
+        print(f"x.shape: {x.shape}")
+        print('forward entry, self.query.shape =', self.query.shape)
         q = repeat(self.query, 'n d -> b m n d', b=x.shape[0], m=x.shape[1])
 
         x = self.ln_k(x)
