@@ -87,8 +87,7 @@ def validation(rank, world_size, args):
     # for i in range(len(model.model.layers)):
     #     model.model.layers[i] = checkpoint_module(model.model.layers[i])
     # model.model.mm_projector = checkpoint_module(model.model.mm_projector)
-
-    # # 4. Configure FSDP wrapping
+    
     # auto_wrap_policy = partial(
     #     size_based_auto_wrap_policy,
     #     min_num_params=1e4  # Adjust based on layer sizes
@@ -106,26 +105,26 @@ def validation(rank, world_size, args):
     #     min_num_params=1e2,
     # )
     
-    # auto_wrap_policy = partial(
-    #     transformer_auto_wrap_policy,
-    #     transformer_layer_cls={
-    #         LlamaDecoderLayer
-    #     },
-    # )
+    auto_wrap_policy = partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls={
+            LlamaDecoderLayer
+        },
+    )
     
-    # fsdp_wrap = lambda m: FSDP(
-    #     m,
-    #     # compute_dtype=torch.float32,
-    #     fp32_reduce_scatter=False,
-    #     flatten_parameters=False,
-    #     shard_param_on_dim_0=False,
-    #     pin_layout_in_collective_ops=True,
-    #     auto_wrap_policy=None,
-    #     auto_wrapper_callable=None,
-    #     reshard_after_forward=True
-    # )
+    fsdp_wrap = lambda m: FSDP(
+        m,
+        # compute_dtype=torch.float32,
+        fp32_reduce_scatter=False,
+        flatten_parameters=False,
+        shard_param_on_dim_0=False,
+        pin_layout_in_collective_ops=True,
+        auto_wrap_policy=auto_wrap_policy,
+        auto_wrapper_callable=None,
+        reshard_after_forward=True
+    )
     
-    grad_ckpt_wrap = checkpoint_module if args.use_gradient_checkpointing else (lambda x: x)
+    # grad_ckpt_wrap = checkpoint_module if args.use_gradient_checkpointing else (lambda x: x)
     
     # for name, sub in model.model.named_children():
     #     print(name, sub)
@@ -135,41 +134,37 @@ def validation(rank, world_size, args):
         
     #     if name == "mm_projector":
     #         continue
-        
-    #     # Note: wrap with `checkpoint_module` first BEFORE wrapping with FSDP
+    
     #     m_fsdp = fsdp_wrap(grad_ckpt_wrap(getattr(model.model, name)))
     #     setattr(model, name, m_fsdp)
     
     # for name, sub_module in model.model.named_children():
-    #     # Skip empty / helper modules
     #     if sum(p.numel() for p in sub_module.parameters()) == 0:
     #         print(f"Skip empty / helper modules: {name, sub_module}")
     #         continue
 
-    #     # 1a) Skip mm_projector
+    #     
     #     if name == "mm_projector":
     #         continue
 
-    #     # 1b) Wrap each decoder layer individually
+    
     #     if name == "layers":
     #         print("→ Wrapping each LlamaDecoderLayer in 'layers'")
     #         for idx, layer in enumerate(sub_module):
     #             wrapped = fsdp_wrap(grad_ckpt_wrap(layer))
     #             sub_module[idx] = wrapped
 
-    #     # 1c) All other modules under model.model get wrapped as a whole
-    #     else:
+    
     #         print(f"→ Wrapping model.model.{name}")
     #         wrapped = fsdp_wrap(grad_ckpt_wrap(sub_module))
     #         setattr(model.model, name, wrapped)
 
-    # # 2) Now wrap the standalone lm_head on the top-level model
-    # print("→ Wrapping model.lm_head")
+    
     # model.lm_head = fsdp_wrap(grad_ckpt_wrap(model.lm_head))
-
-    # # 3) Finally, wrap the *entire* model to shard any residual parameters
-    # print("→ Wrapping the rest of the model")
-    # model = fsdp_wrap(model)
+    
+    model = fsdp_wrap(model)
+    
+    print("After model fsdp_wrap:", model.model.mm_projector.attn_pool.query.shape)
     
     # -----------------------------------------------
     
@@ -224,46 +219,39 @@ def validation(rank, world_size, args):
     
     # -----------------------------------------
     
-    def my_wrap_policy(module, recurse, unwrapped_params):
-        # skip projector
-        if isinstance(module, AttentionalPoolProjector):
-            return False
-        # wrap all other submodules, including Embedding, Linear (lm_head), DecoderLayer, Norm, etc.
-        return True
-
-    # 2) Your fsdp_wrap helper
-    fsdp_wrap = lambda m: FSDP(
-        m,
-        auto_wrap_policy=my_wrap_policy,
-        reshard_after_forward=True,
-        # any other flags you had...
-    )
-
-    # 3) Manual, interleaved wrapping of the decoder layers (optional but good for memory):
-    wrapped_layers = nn.ModuleList([
-        fsdp_wrap(checkpoint_module(layer))
-        for layer in model.model.layers
-    ])
-    model.model.layers = wrapped_layers
-
-    # 4) Wrap the rest of model.model’s children (embed_tokens, norm, rotary_emb):
-    for name, sub in model.model.named_children():
-        if name == "layers" or name == "mm_projector":
-            continue
-        setattr(model.model, name, fsdp_wrap(sub))
+    # def my_wrap_policy(module, recurse, unwrapped_params):
+    #     # skip projector
+    #     if isinstance(module, AttentionalPoolProjector):
+    #         return False
+    #     # wrap all other submodules
+    #     return True
+    
+    # fsdp_wrap = lambda m: FSDP(
+    #     m,
+    #     auto_wrap_policy=my_wrap_policy,
+    #     reshard_after_forward=True,
+    # )
+    
+    # wrapped_layers = nn.ModuleList([
+    #     fsdp_wrap(checkpoint_module(layer))
+    #     for layer in model.model.layers
+    # ])
+    # model.model.layers = wrapped_layers
+    
+    # for name, sub in model.model.named_children():
+    #     if name == "layers" or name == "mm_projector":
+    #         continue
+    #     setattr(model.model, name, fsdp_wrap(sub))
         
-    print(model)
-
-    # 5) Wrap lm_head on the top-level model
-    model.lm_head = fsdp_wrap(model.lm_head)
-
-    # 6) **Finally** wrap the entire model to catch any stray params—policy will skip AttentionalPoolProjector
-    model = fsdp_wrap(model)
+    
+    # model.lm_head = fsdp_wrap(model.lm_head)
+    
+    # model = fsdp_wrap(model)
     
         
     ####################### FSDP SETUP #######################
     
-    print(model)
+    # print(model)
     
     # model = model.to(device)
     model.eval()
