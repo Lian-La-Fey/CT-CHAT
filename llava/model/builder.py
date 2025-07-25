@@ -61,12 +61,18 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             print('Loading LLaVA from base model...')
             lora_cfg_pretrained.pad_token_id = None
             lora_cfg_pretrained.vocab_size = lora_cfg_pretrained.vocab_size - 1 - 4
-            model = LlavaLlamaForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
             
-            print("After load:", model.model.mm_projector.attn_pool.query.shape)
+            model = LlavaLlamaForCausalLM.from_pretrained(
+                model_base, 
+                low_cpu_mem_usage=True,
+                config=lora_cfg_pretrained, 
+                **kwargs
+            )
+            
+            # print("After load:", model.model.mm_projector.attn_pool.query)
 
 
-            print(f"Adding pad token as '<pad>'")
+            # print(f"Adding pad token as '<pad>'")
 
             special_tokens_dict = {
                 "pad_token": "<pad>",
@@ -107,8 +113,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
             model.load_state_dict(non_lora_trainables, strict=False)
             
-            print("non_lora keys:", [k for k in non_lora_trainables if "attn_pool.query" in k])
-            print("After load:", model.model.mm_projector.attn_pool.query.shape)
+            # print("non_lora keys:", [k for k in non_lora_trainables if "attn_pool.query" in k])
+            # print("After load:", model.model.mm_projector.attn_pool.query.shape)
 
             from peft import PeftModel
             print('Loading LoRA weights...')
@@ -117,8 +123,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             model = model.merge_and_unload()
             print('Model is loaded...')
             
-            print("After PeftModel non_lora keys:", [k for k in non_lora_trainables if "attn_pool.query" in k])
-            print("After PeftModel load:", model.model.mm_projector.attn_pool.query.shape)
+            # print("After PeftModel non_lora keys:", [k for k in non_lora_trainables if "attn_pool.query" in k])
+            # print("After PeftModel load:", model.model.mm_projector.attn_pool.query)
             
             # print(model)
             # print(model.model)

@@ -65,7 +65,7 @@ class AttentionalPooler(nn.Module):
         if x.ndim == 3:
             x = rearrange(x, 'b n d -> b 1 n d')
         
-        print(f"x.shape: {x.shape}")
+        # print(f"x.shape: {x.shape}")
         print('forward entry, self.query.shape =', self.query.shape)
         q = repeat(self.query, 'n d -> b m n d', b=x.shape[0], m=x.shape[1])
 

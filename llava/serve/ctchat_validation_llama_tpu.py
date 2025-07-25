@@ -1,4 +1,5 @@
 import os
+import gc
 import argparse
 import torch
 import torch.nn as nn
@@ -29,6 +30,7 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 import torch_xla.distributed.parallel_loader as pl
 import torch_xla.distributed.xla_multiprocessing as xmp
+import torch.distributed as dist
 
 from torch_xla.distributed.fsdp import XlaFullyShardedDataParallel as FSDP, checkpoint_module
 from torch_xla.distributed.fsdp.wrap import (size_based_auto_wrap_policy,
@@ -38,11 +40,18 @@ import torch_xla.distributed.fsdp as fsdp
 import torch_xla.distributed.fsdp as xla_fsdp
 
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-from llava.model.multimodal_projector.coca_attentional_pooler import AttentionalPoolProjector
+from llava.model.multimodal_projector.coca_attentional_pooler import AttentionalPoolProjector, AttentionalPooler
 
 
 ################ For TPU support ################
 
+############ Bad Exhauste error #################
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.8"
+os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+
+################################################
 
 def load_image(image_file):
     if image_file.startswith('http://') or image_file.startswith('https://'):
@@ -54,6 +63,8 @@ def load_image(image_file):
 
 
 def validation(rank, world_size, args):
+    xm.master_print(f"World Size: {world_size}")
+    
     device = xm.xla_device()
     # xm.set_rng_state(0, device=device)  # Determinizm
     
@@ -74,186 +85,85 @@ def validation(rank, world_size, args):
         device=str(device)  # TPU
     )
     
+    if xm.is_master_ordinal():
+        print(model)
     
+    print("Before model fsdp_wrap:", model.model.mm_projector.attn_pool.query.shape)
     
-    ####################### FSDP SETUP #######################
-    
+    ####################### FSDP SETUP #######################   
     model = model.to(torch.float32)
-    
-    # if hasattr(model, 'tie_weights'):
-    #     model.tie_weights()  # Ensure weights are tied initially
-    # model.lm_head.weight = torch.nn.Parameter(model.lm_head.weight.clone())
-    
-    # for i in range(len(model.model.layers)):
-    #     model.model.layers[i] = checkpoint_module(model.model.layers[i])
-    # model.model.mm_projector = checkpoint_module(model.model.mm_projector)
-    
-    # auto_wrap_policy = partial(
-    #     size_based_auto_wrap_policy,
-    #     min_num_params=1e4  # Adjust based on layer sizes
-    # )
-    
-    # model = fsdp.XlaFullyShardedDataParallel(
-    #     model,
-    #     auto_wrap_policy=auto_wrap_policy,
-    #     reshard_after_forward=True,  # Enable ZeRO-3
-    #     flatten_parameters=True,
-    # )
         
     # auto_wrap_policy = partial(
     #     size_based_auto_wrap_policy,
-    #     min_num_params=1e2,
+    #     min_num_params=1e6,
     # )
     
-    auto_wrap_policy = partial(
-        transformer_auto_wrap_policy,
-        transformer_layer_cls={
-            LlamaDecoderLayer
-        },
-    )
-    
-    fsdp_wrap = lambda m: FSDP(
-        m,
-        # compute_dtype=torch.float32,
-        fp32_reduce_scatter=False,
-        flatten_parameters=False,
-        shard_param_on_dim_0=False,
-        pin_layout_in_collective_ops=True,
-        auto_wrap_policy=auto_wrap_policy,
-        auto_wrapper_callable=None,
-        reshard_after_forward=True
-    )
-    
-    # grad_ckpt_wrap = checkpoint_module if args.use_gradient_checkpointing else (lambda x: x)
-    
-    # for name, sub in model.model.named_children():
-    #     print(name, sub)
-    #     if sum(p.numel() for p in sub.parameters()) == 0:
-    #         print(name, sub)
-    #         continue
-        
-    #     if name == "mm_projector":
-    #         continue
-    
-    #     m_fsdp = fsdp_wrap(grad_ckpt_wrap(getattr(model.model, name)))
-    #     setattr(model, name, m_fsdp)
-    
-    # for name, sub_module in model.model.named_children():
-    #     if sum(p.numel() for p in sub_module.parameters()) == 0:
-    #         print(f"Skip empty / helper modules: {name, sub_module}")
-    #         continue
-
-    #     
-    #     if name == "mm_projector":
-    #         continue
-
-    
-    #     if name == "layers":
-    #         print("→ Wrapping each LlamaDecoderLayer in 'layers'")
-    #         for idx, layer in enumerate(sub_module):
-    #             wrapped = fsdp_wrap(grad_ckpt_wrap(layer))
-    #             sub_module[idx] = wrapped
-
-    
-    #         print(f"→ Wrapping model.model.{name}")
-    #         wrapped = fsdp_wrap(grad_ckpt_wrap(sub_module))
-    #         setattr(model.model, name, wrapped)
-
-    
-    # model.lm_head = fsdp_wrap(grad_ckpt_wrap(model.lm_head))
-    
-    model = fsdp_wrap(model)
-    
-    print("After model fsdp_wrap:", model.model.mm_projector.attn_pool.query.shape)
-    
-    # -----------------------------------------------
-    
-    # model = FSDP(model, reshard_after_forward=True)
-    
-    # -----------------------------------------------
-    
-    
-    # llama_fsdp_policy = partial(
+    # auto_wrap_policy = partial(
     #     transformer_auto_wrap_policy,
-    #     transformer_layer_cls={LlamaDecoderLayer}
-    # )
-
-    # # 2. Wrap your model with XlaFullyShardedDataParallel
-    # # The outer wrapper handles any parameters not in a LlamaDecoderLayer
-    # # (like embeddings and the final lm_head).
-    # model = xla_fsdp.XlaFullyShardedDataParallel(
-    #     model,
-    #     auto_wrap_policy=llama_fsdp_policy,
-    #     # reshard_after_forward=True enables full ZeRO-3 parameter sharding
-    #     reshard_after_forward=True
+    #     transformer_layer_cls={
+    #         LlamaDecoderLayer
+    #     },
     # )
     
-    # ---------------------------------------------------------
-    
-    # def llama_fsdp_policy(module, recurse, unwrapped_params):
-    #     from llava.model.multimodal_projector.coca_attentional_pooler import AttentionalPoolProjector
-    #     if isinstance(module, AttentionalPoolProjector):
-    #         return False
-    #     return transformer_auto_wrap_policy(
-    #         module,
-    #         recurse=recurse,
-    #         unwrapped_params=unwrapped_params,
-    #         transformer_layer_cls={LlamaDecoderLayer}
-    #     )
-
-    # wrapped_layers = nn.ModuleList()
-    # for layer in model.model.layers:
-    #     wrapped_layer = xla_fsdp.XlaFullyShardedDataParallel(
-    #         checkpoint_module(layer),
-    #         auto_wrap_policy=llama_fsdp_policy,
-    #         reshard_after_forward=True
-    #     )
-    #     wrapped_layers.append(wrapped_layer)
-    # model.model.layers = wrapped_layers
-
-    # model = xla_fsdp.XlaFullyShardedDataParallel(
-    #     model,
-    #     auto_wrap_policy=llama_fsdp_policy,
-    #     reshard_after_forward=True
-    # )
-    
-    # -----------------------------------------
-    
-    # def my_wrap_policy(module, recurse, unwrapped_params):
-    #     # skip projector
-    #     if isinstance(module, AttentionalPoolProjector):
-    #         return False
-    #     # wrap all other submodules
-    #     return True
+    # auto_wrapper_callable = lambda m, *args, **kwargs: FSDP(checkpoint_module(m), *args, **kwargs)
+    # grad_ckpt_wrap = checkpoint_module if args.use_gradient_checkpointing else (lambda x: x)
     
     # fsdp_wrap = lambda m: FSDP(
     #     m,
-    #     auto_wrap_policy=my_wrap_policy,
+    #     auto_wrap_policy=None,
+    #     auto_wrapper_callable=auto_wrapper_callable,
     #     reshard_after_forward=True,
+    #     compute_dtype=torch.bfloat16,
+    #     buffer_dtype=torch.bfloat16,
+    #     pin_layout_in_collective_ops=True,
     # )
     
-    # wrapped_layers = nn.ModuleList([
-    #     fsdp_wrap(checkpoint_module(layer))
+    ##################### NESTED FSDP #########################
+    
+    # wrap single LlamaDecoderLayers
+    # model.model.layers = nn.ModuleList([
+    #     fsdp_wrap(grad_ckpt_wrap(layer))
     #     for layer in model.model.layers
     # ])
-    # model.model.layers = wrapped_layers
     
-    # for name, sub in model.model.named_children():
-    #     if name == "layers" or name == "mm_projector":
-    #         continue
-    #     setattr(model.model, name, fsdp_wrap(sub))
-        
+    # wrap submodules
+    # submodules_to_wrap = [
+    #     "embed_tokens",
+    #     "mm_projector",
+    #     "norm",
+    #     "lm_head"
+    # ]
     
-    # model.lm_head = fsdp_wrap(model.lm_head)
+    # for name in submodules_to_wrap:
+    #     submodule = getattr(model.model if hasattr(model.model, name) else model, name)
+    #     if sum(p.numel() for p in submodule.parameters()) > 0:  # Skip if no params
+    #         wrapped_module = fsdp_wrap(grad_ckpt_wrap(submodule))
+    #         if hasattr(model.model, name):
+    #             setattr(model.model, name, wrapped_module)
+    #         else:
+    #             setattr(model, name, wrapped_module)
     
+    # # wrap the main language model container
+    # model.model = fsdp_wrap(grad_ckpt_wrap(model.model))
     # model = fsdp_wrap(model)
+    
+    # -----------------------------------------------
+    
+    model = FSDP(model, reshard_after_forward=True, pin_layout_in_collective_ops=True, flatten_parameters=True, shard_param_on_dim_0=True)
+    
+    # -----------------------------------------------
     
         
     ####################### FSDP SETUP #######################
     
-    # print(model)
+    # if xm.is_master_ordinal():
+    #     print(model)
     
-    # model = model.to(device)
+    model = model.to(torch.bfloat16)
+    
+    print("After model fsdp_wrap:", model.model.mm_projector.attn_pool.query.shape)
+    
+    model = model.to(device)
     model.eval()
     
     # Open and read the JSON file
@@ -268,7 +178,7 @@ def validation(rank, world_size, args):
     local_data = data_val[start_idx:end_idx]
     
     output_save = []
-    for element in tqdm.tqdm(data_val, desc=f"Rank {rank}"):
+    for element in tqdm.tqdm(local_data, desc=f"Rank {rank}"):
         
         if "llama-2" in model_name.lower():
             conv_mode = "llava_llama_2"
@@ -368,6 +278,7 @@ def validation(rank, world_size, args):
     xm.rendezvous("save_complete")
     
 def _mp_fn(index, args):
+    dist.init_process_group('xla', init_method='xla://')
     world_size = xr.world_size()
     validation(index, world_size, args)
 
