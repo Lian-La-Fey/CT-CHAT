@@ -374,7 +374,7 @@ def _mp_fn(index, args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default="/home/raspuntinov/gcs/ct_rate/models/ct_chat/llava-lora-llama_3.1_8b")
-    parser.add_argument("--model_base", type=str, default="meta-llama/Llama-3.1-8B")
+    parser.add_argument("--model_base", type=str, default="/home/raspuntinov/gcs/ct_rate/models/ct_chat/llama_3.1_8b_instrcut")
     parser.add_argument("--device", type=str, default="tpu")
     parser.add_argument("--conv_mode", type=str, default=None)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -386,7 +386,7 @@ if __name__ == "__main__":
     
     # Additional path parameters
     parser.add_argument("--output_file", type=str, 
-                        default="./output/output_validation_CTRATE_ChestReport_CT_CLIPllama_3_8b.json",
+                        default="/home/raspuntinov/gcs/ct_rate/outputs/output_validation_CTRATE_ChestReport_CT_CLIPllama_3_8b.json",
                         help="Output file path")
     parser.add_argument("--input_data", type=str, 
                         default="/home/raspuntinov/gcs/ct_rate/dataset/vqa/valid_vqa.json",
