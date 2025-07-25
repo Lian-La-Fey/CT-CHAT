@@ -120,8 +120,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             print("After PeftModel non_lora keys:", [k for k in non_lora_trainables if "attn_pool.query" in k])
             print("After PeftModel load:", model.model.mm_projector.attn_pool.query.shape)
             
-            print(model)
-            print(model.model)
+            # print(model)
+            # print(model.model)
 
         elif model_base is not None:
             # this may be mm projector only

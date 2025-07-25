@@ -120,16 +120,11 @@ def main(args):
     # print(f"Model: {model}")
     # print(model.model.layers[0])
     
-    # auto_wrap_policy = functools.partial(
-    #     transformer_auto_wrap_policy,
-    #     transformer_layer_cls={
-    #         LlamaDecoderLayer
-    #     },
-    # )
-    
     auto_wrap_policy = functools.partial(
-        size_based_auto_wrap_policy,
-        min_num_params=args.auto_wrap_min_num_params
+        transformer_auto_wrap_policy,
+        transformer_layer_cls={
+            LlamaDecoderLayer
+        },
     )
     
     model = FSDPv2(model, auto_wrap_policy=auto_wrap_policy)
